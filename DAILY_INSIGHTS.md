@@ -1,25 +1,27 @@
 # Daily GitPulse Insights
 
-Last Updated: 2026-04-13T13:21:38.025Z
+Last Updated: 2026-04-15T05:18:20.379Z
 
-### Performance Optimization: Mitigating Thundering Herds with Adaptive Leases
+### Optimizing Hot Paths with Singleflight
 
-In high-traffic distributed systems, naive cache invalidation often triggers a "thundering herd" effect. When a hot key expires, thousands of concurrent requests may bypass the cache and saturate the origin database simultaneously.
+In high-concurrency environments, a common pitfall is the **Cache Stampede**. When a high-traffic key expires, dozens of concurrent workers may simultaneously trigger a cache miss, slamming your downstream database with redundant queries.
 
-A senior approach utilizes **Singleflight suppression** or **Probabilistic Early Recomputation**. By implementing an atomic "lease" or using a dedicated group-cache, only the first request is permitted to recompute the value, while subsequent concurrent requests wait for the result or receive a transient "stale" value.
+A senior approach utilizes the `Singleflight` pattern (Request Collapsing). This ensures that for any given key, only one execution is in flight at a time. All other callers block until the first one returns, sharing the result.
 
 ```go
-// Using singleflight to suppress redundant downstream calls
 var g singleflight.Group
 
-func getSharedResource(ctx context.Context, key string) (Data, error) {
-    v, err, shared := g.Do(key, func() (interface{}, error) {
-        return fetchFromSource(ctx, key)
+func getResource(ctx context.Context, id string) (*Data, error) {
+    // Deduplicate concurrent calls for the same ID
+    v, err, shared := g.Do(id, func() (interface{}, error) {
+        return db.Fetch(ctx, id) // Only hits the DB once
     })
-    
-    // 'shared' indicates if multiple goroutines received the same value
-    return v.(Data), err
+
+    if err != nil {
+        return nil, err
+    }
+    return v.(*Data), nil
 }
 ```
 
-**The Insight:** Design for the "failure of success." In-memory request collapsing transforms an $O(N)$ database load into $O(1)$, ensuring system resilience during peak traffic spikes. Always prefer eventual consistency over a cascaded system collapse.
+**Technical Insight:** Optimizing for the happy path is trivial. Senior engineering is about managing the non-linear performance degradation at the edges. By deduplicating in-flight requests, we flatten the p99 latency spikes and prevent cascading failures during TTL expiration. Always protect your origins.
