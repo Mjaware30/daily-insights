@@ -1,27 +1,31 @@
 # Daily GitPulse Insights
 
-Last Updated: 2026-04-23T04:49:03.390Z
+Last Updated: 2026-04-23T04:49:04.516Z
 
-### Optimization: Mitigating Thundering Herds with Request Collapsing
+### Optimizing for Reliability: The Idempotency Key Pattern
 
-In high-concurrency environments, a cache miss on a hot key can trigger a **Thundering Herd**—where thousands of concurrent threads attempt to recompute the same expensive value simultaneously, potentially saturating the upstream database.
+In distributed systems, "At-Least-Once" delivery is a common failure mode. To prevent side-effect duplication during client retries, senior engineers implement **Idempotency Keys**. This pattern ensures that multiple identical requests yield the same result without redundant processing.
 
-A senior architectural pattern to solve this is **Request Collapsing** (often implemented via `singleflight`). This ensures that for a unique key, only one execution is active at a time; subsequent callers "subscribe" to the result of the first call rather than spawning redundant I/O.
+```typescript
+async function handleMutation(req: Request) {
+  const idempotencyKey = req.headers['x-idempotency-key'];
+  if (!idempotencyKey) throw new Error("Idempotency-Key required");
 
-```go
-// Utilizing a SingleFlight group to deduplicate concurrent work
-func (s *Service) GetUser(id string) (*User, error) {
-    res, err, shared := s.sfGroup.Do(id, func() (interface{}, error) {
-        // Only one goroutine enters here; others block on the result
-        return s.db.FetchUser(id)
-    })
+  // 1. Check cache for existing execution record
+  const cachedResponse = await redis.get(`idempotency:${idempotencyKey}`);
+  if (cachedResponse) return JSON.parse(cachedResponse);
 
-    if err != nil {
-        return nil, err
-    }
-    
-    return res.(*User), nil
+  // 2. Use a distributed lock to prevent race conditions
+  return await redlock.using([`lock:${idempotencyKey}`], 5000, async () => {
+    const result = await db.transaction(async (tx) => {
+      return await performSensitiveLogic(tx, req.body);
+    });
+
+    // 3. Persist the result for 24 hours
+    await redis.set(`idempotency:${idempotencyKey}`, JSON.stringify(result), 'EX', 86400);
+    return result;
+  });
 }
 ```
 
-By decoupling the request volume from the upstream load, you shift the bottleneck from I/O throughput to simple mutex synchronization—drastically improving tail latency (`p99`) during traffic spikes.
+**Insight:** Beyond basic CRUD, treating mutations as re-entrant is vital. By caching response payloads against a client-generated UUID, you decouple system state from network instability, guaranteeing atomicity across retries.
